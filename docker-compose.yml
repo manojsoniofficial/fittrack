@@ -1,0 +1,79 @@
+version: "3.9"
+
+# ── FitTrack Pro — Docker Compose ─────────────────────────────────────────────
+# Services:
+#   db       — PostgreSQL 15
+#   api      — Flask REST API (gunicorn)
+#   migrate  — One-shot: creates tables and seeds demo data
+#
+# Usage:
+#   docker compose up --build          # Start everything
+#   docker compose up -d               # Detached mode
+#   docker compose down -v             # Stop and remove volumes
+#   docker compose logs -f api         # Follow API logs
+#   docker compose exec api flask seed-db   # Re-seed data
+
+services:
+
+  # ── PostgreSQL 15 ────────────────────────────────────────────────────────────
+  db:
+    image: postgres:15-alpine
+    container_name: fittrack_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fittrack
+      POSTGRES_PASSWORD: fittrack_pass
+      POSTGRES_DB: fittrack_dev
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fittrack -d fittrack_dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Flask REST API ────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fittrack_api
+    restart: unless-stopped
+    environment:
+      FLASK_ENV: development
+      DATABASE_URL: postgresql://fittrack:fittrack_pass@db:5432/fittrack_dev
+      SECRET_KEY: dev-secret-key-change-for-production
+      JWT_SECRET_KEY: dev-jwt-secret-change-for-production
+    ports:
+      - "5000:5000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./api:/app/api
+      - ./models:/app/models
+      - ./run_api.py:/app/run_api.py
+    command: >
+      sh -c "
+        flask --app run_api init-db &&
+        flask --app run_api seed-db &&
+        gunicorn run_api:app --bind 0.0.0.0:5000 --workers 2 --reload
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  default:
+    name: fittrack_network

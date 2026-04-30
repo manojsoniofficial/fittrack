@@ -1,0 +1,217 @@
+name: FitTrack Pro CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Unit + Business Logic Tests (no DB needed) ────────────────────────────
+  unit-tests:
+    name: Unit & Business Logic Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install sqlalchemy pytest pytest-cov flake8
+
+      - name: Lint with flake8
+        run: |
+          flake8 models/ tests/test_suite.py \
+            --count --select=E9,F63,F7,F82 \
+            --show-source --statistics
+          flake8 models/ tests/test_suite.py \
+            --count --exit-zero --max-line-length=120 --statistics
+
+      - name: Run unit & integration tests
+        run: |
+          pytest tests/test_suite.py -v --tb=short \
+            --cov=models \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage_unit.xml \
+            --cov-fail-under=80
+
+      - name: Upload unit coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage_unit.xml
+          flags: unit-tests
+
+  # ── Flask API Tests (SQLite in-memory) ───────────────────────────────────
+  api-tests:
+    name: Flask API Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install API + test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-api.txt -r requirements-test.txt
+
+      - name: Lint API code
+        run: |
+          flake8 api/ tests/test_api.py \
+            --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 api/ tests/test_api.py \
+            --count --exit-zero --max-line-length=120 --statistics
+
+      - name: Run Flask API tests
+        env:
+          FLASK_ENV: testing
+          SECRET_KEY: ci-secret-key
+          JWT_SECRET_KEY: ci-jwt-secret
+        run: |
+          pytest tests/test_api.py -v --tb=short \
+            --cov=api \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage_api.xml \
+            --cov-fail-under=80
+
+      - name: Upload API coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage_api.xml
+          flags: api-tests
+
+  # ── Full Integration Tests with PostgreSQL ───────────────────────────────
+  integration-postgres:
+    name: Integration Tests (PostgreSQL 15)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: fittrack_test
+          POSTGRES_PASSWORD: fittrack_test_pass
+          POSTGRES_DB: fittrack_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install all dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-api.txt -r requirements-test.txt
+
+      - name: Run API tests against PostgreSQL
+        env:
+          FLASK_ENV: testing
+          DATABASE_URL: postgresql://fittrack_test:fittrack_test_pass@localhost:5432/fittrack_test
+          SECRET_KEY: ci-secret-key
+          JWT_SECRET_KEY: ci-jwt-secret
+        run: |
+          pytest tests/test_api.py tests/test_suite.py -v --tb=short \
+            --cov=api --cov=models \
+            --cov-report=term-missing \
+            --cov-fail-under=80
+
+  # ── Coverage Badge Generation ────────────────────────────────────────────
+  coverage-badge:
+    name: Coverage Badge
+    runs-on: windows-latest
+    needs: [unit-tests, api-tests]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: cmd
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-api.txt -r requirements-test.txt
+
+      - name: Run coverage batch
+        shell: cmd
+        run: |
+          coverage_reports\run_coverage.bat
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            coverage_reports/coverage.xml
+            coverage_reports/coverage-badge.svg
+            coverage_reports/html/
+          if-no-files-found: error
+
+      - name: Commit updated coverage badge
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add coverage_reports/coverage-badge.svg
+          if git diff --cached --quiet; then
+            echo "No badge changes to commit."
+            exit 0
+          fi
+          git commit -m "chore(ci): update coverage badge [skip ci]"
+          git push || echo "Could not push badge commit (likely branch protection)."
+
+  # ── Docker Build Check ────────────────────────────────────────────────────
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t fittrack-api:ci .
+
+      - name: Test Docker image starts
+        run: |
+          docker run --rm -d \
+            -e FLASK_ENV=development \
+            -e DATABASE_URL=sqlite:///test.db \
+            -e SECRET_KEY=test \
+            -e JWT_SECRET_KEY=test \
+            --name fittrack_ci_test \
+            fittrack-api:ci \
+            gunicorn run_api:app --bind 0.0.0.0:5000 --workers 1 --timeout 10 &
+          sleep 5
+          docker stop fittrack_ci_test || true

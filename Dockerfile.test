@@ -1,0 +1,18 @@
+# ── FitTrack Pro — Test Dockerfile ───────────────────────────────────────────
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libpq-dev curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-api.txt requirements-test.txt ./
+RUN pip install --no-cache-dir -r requirements-api.txt -r requirements-test.txt
+
+COPY api/       ./api/
+COPY models/    ./models/
+COPY tests/     ./tests/
+COPY run_api.py ./run_api.py
+
+CMD ["pytest", "tests/", "-v", "--tb=short"]
